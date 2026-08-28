@@ -1,7 +1,7 @@
 # MirrorPod
 
 <p align="center">
-  <img src="Assets/AppIcon-1024.png" width="160" alt="MirrorPod app icon">
+  <img src="Assets/AppIcon.icon/Assets/AppIcon-1024.png" width="160" alt="MirrorPod app icon">
 </p>
 
 MirrorPod lets Spotify (or any other Mac audio) keep playing normally to a HomePod while it mirrors the same system audio to the MacBook's built-in speakers.
@@ -47,6 +47,8 @@ swift run -c release mirrorpod --delay-ms 1800
 ```
 
 ## Development
+
+Building the app bundle requires Xcode 26 or later. The app icon is maintained as an Icon Composer document at `Assets/AppIcon.icon`; the build script compiles it with Xcode's asset tool.
 
 ```sh
 xcrun swift-format lint --recursive --configuration .swift-format Sources Package.swift
