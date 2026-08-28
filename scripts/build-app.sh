@@ -22,5 +22,6 @@ xcrun swiftc \
     -o "$MACOS_PATH/MirrorPod"
 
 codesign --force --deep --sign - "$APP_PATH"
+touch "$APP_PATH"
 
 echo "Built $APP_PATH"
