@@ -10,6 +10,8 @@
     <string>MirrorPod</string>
     <key>CFBundleIdentifier</key>
     <string>com.yehudaneufeld.MirrorPod</string>
+    <key>CFBundleIconFile</key>
+    <string>MirrorPod</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>

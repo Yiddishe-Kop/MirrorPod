@@ -1,5 +1,9 @@
 # MirrorPod
 
+<p align="center">
+  <img src="Assets/AppIcon-1024.png" width="160" alt="MirrorPod app icon">
+</p>
+
 MirrorPod lets Spotify (or any other Mac audio) keep playing normally to a HomePod while it mirrors the same system audio to the MacBook's built-in speakers.
 
 The menu-bar app uses the native macOS 26 Liquid Glass interface and requires macOS 26 or later.
