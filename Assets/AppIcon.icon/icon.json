@@ -1,13 +1,35 @@
 {
   "fill" : {
-    "automatic-gradient" : "extended-srgb:0.00000,0.53333,1.00000,1.00000"
+    "linear-gradient" : [
+      "display-p3:0.56381,0.69349,0.93959,1.00000",
+      "display-p3:0.91503,0.94028,1.00000,1.00000"
+    ],
+    "orientation" : {
+      "start" : {
+        "x" : 0.5,
+        "y" : 0
+      },
+      "stop" : {
+        "x" : 0.5,
+        "y" : 0.7
+      }
+    }
   },
   "groups" : [
     {
       "layers" : [
         {
-          "image-name" : "AppIcon-1024.png",
-          "name" : "MirrorPod"
+          "blend-mode" : "normal",
+          "glass" : false,
+          "image-name" : "MirrorPod-Foreground.png",
+          "name" : "MirrorPod Foreground",
+          "position" : {
+            "scale" : 0.7,
+            "translation-in-points" : [
+              0,
+              0
+            ]
+          }
         }
       ],
       "name" : "Artwork",

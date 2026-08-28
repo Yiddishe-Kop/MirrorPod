@@ -1,7 +1,7 @@
 # MirrorPod
 
 <p align="center">
-  <img src="Assets/AppIcon.icon/Assets/AppIcon-1024.png" width="160" alt="MirrorPod app icon">
+  <img src="Assets/AppIcon.icon/Assets/MirrorPod-Foreground.png" width="160" alt="MirrorPod app icon foreground">
 </p>
 
 MirrorPod lets Spotify (or any other Mac audio) keep playing normally to a HomePod while it mirrors the same system audio to the MacBook's built-in speakers.
