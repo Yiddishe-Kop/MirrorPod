@@ -4,23 +4,24 @@ import CoreGraphics
 import Foundation
 import ScreenCaptureKit
 
-private struct Options {
-    var delayMilliseconds = 2_000
+// MARK: - Command-line options
+
+private struct CommandLineOptions {
+    static let defaultDelayMilliseconds = 2_000
+
+    var delayMilliseconds = Self.defaultDelayMilliseconds
     var listDevices = false
 
-    static func parse() throws -> Options {
-        var options = Options()
+    static func parse() throws -> CommandLineOptions {
+        var options = CommandLineOptions()
         var arguments = Array(CommandLine.arguments.dropFirst())
 
         while !arguments.isEmpty {
             let argument = arguments.removeFirst()
+
             switch argument {
             case "--delay-ms":
-                guard let value = arguments.first, let milliseconds = Int(value), milliseconds >= 0 else {
-                    throw MirrorError.usage("--delay-ms requires a non-negative integer")
-                }
-                arguments.removeFirst()
-                options.delayMilliseconds = milliseconds
+                options.delayMilliseconds = try parseDelay(from: &arguments)
             case "--list-devices":
                 options.listDevices = true
             case "--help", "-h":
@@ -34,19 +35,34 @@ private struct Options {
         return options
     }
 
+    private static func parseDelay(from arguments: inout [String]) throws -> Int {
+        guard let value = arguments.first,
+            let milliseconds = Int(value),
+            milliseconds >= 0
+        else {
+            throw MirrorError.usage("--delay-ms requires a non-negative integer")
+        }
+
+        arguments.removeFirst()
+
+        return milliseconds
+    }
+
     static let help = """
-    MirrorPod — mirror Mac system audio to the built-in speakers while the normal output is a HomePod.
+        MirrorPod — mirror Mac system audio to the built-in speakers while the normal output is a HomePod.
 
-    Usage:
-      mirrorpod [--delay-ms MILLISECONDS]
-      mirrorpod --list-devices
+        Usage:
+          mirrorpod [--delay-ms MILLISECONDS]
+          mirrorpod --list-devices
 
-    Options:
-      --delay-ms MILLISECONDS  Delay the MacBook speakers to align with AirPlay (default: 2000).
-      --list-devices           Show available output devices and exit.
-      --help                   Show this help.
-    """
+        Options:
+          --delay-ms MILLISECONDS  Delay the MacBook speakers to align with AirPlay (default: 2000).
+          --list-devices           Show available output devices and exit.
+          --help                   Show this help.
+        """
 }
+
+// MARK: - Errors
 
 enum MirrorError: LocalizedError {
     case usage(String)
@@ -59,7 +75,7 @@ enum MirrorError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .usage(let message):
-            return "\(message)\n\n\(Options.help)"
+            return "\(message)\n\n\(CommandLineOptions.help)"
         case .coreAudio(let operation, let status):
             return "\(operation) failed (Core Audio status \(status))."
         case .noBuiltInOutput:
@@ -69,10 +85,13 @@ enum MirrorError: LocalizedError {
         case .invalidAudioBuffer:
             return "ScreenCaptureKit returned an unsupported audio buffer."
         case .permissionDenied:
-            return "Screen & System Audio Recording permission is required. Enable it for MirrorPod, then launch MirrorPod again."
+            return
+                "Screen & System Audio Recording permission is required. Enable it for MirrorPod, then launch MirrorPod again."
         }
     }
 }
+
+// MARK: - Audio hardware
 
 struct AudioDevice {
     let id: AudioDeviceID
@@ -107,13 +126,17 @@ enum AudioHardware {
         let count = Int(byteCount) / MemoryLayout<AudioDeviceID>.size
         var ids = Array(repeating: AudioDeviceID(0), count: count)
         status = ids.withUnsafeMutableBytes { bytes in
-            AudioObjectGetPropertyData(
+            guard let baseAddress = bytes.baseAddress else {
+                return kAudioHardwareUnspecifiedError
+            }
+
+            return AudioObjectGetPropertyData(
                 AudioObjectID(kAudioObjectSystemObject),
                 &address,
                 0,
                 nil,
                 &byteCount,
-                bytes.baseAddress!
+                baseAddress
             )
         }
         guard status == noErr else {
@@ -121,17 +144,20 @@ enum AudioHardware {
         }
 
         return ids.compactMap { id in
-            guard let name = stringProperty(
-                objectID: id,
-                selector: kAudioObjectPropertyName
-            ) else {
+            guard
+                let name = stringProperty(
+                    objectID: id,
+                    selector: kAudioObjectPropertyName
+                )
+            else {
                 return nil
             }
 
-            let transport = uint32Property(
-                objectID: id,
-                selector: kAudioDevicePropertyTransportType
-            ) ?? 0
+            let transport =
+                uint32Property(
+                    objectID: id,
+                    selector: kAudioDevicePropertyTransportType
+                ) ?? 0
 
             return AudioDevice(
                 id: id,
@@ -280,7 +306,7 @@ enum AudioHardware {
         )
         var byteCount: UInt32 = 0
         guard AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &byteCount) == noErr,
-              byteCount > 0
+            byteCount > 0
         else {
             return 0
         }
@@ -301,6 +327,8 @@ enum AudioHardware {
         return bufferList.reduce(0) { $0 + $1.mNumberChannels }
     }
 }
+
+// MARK: - Audio mirroring
 
 final class AudioMirror: NSObject, SCStreamOutput, SCStreamDelegate {
     private let outputDevice: AudioDevice
@@ -338,15 +366,8 @@ final class AudioMirror: NSObject, SCStreamOutput, SCStreamDelegate {
             delayMilliseconds = max(newValue, 0)
 
             guard let captureFormat else { return }
-            targetDelayFrames = AVAudioFramePosition(
-                captureFormat.sampleRate * Double(delayMilliseconds) / 1_000.0
-            )
-
-            while pendingFrames > targetDelayFrames, !pendingBuffers.isEmpty {
-                let next = pendingBuffers.removeFirst()
-                pendingFrames -= AVAudioFramePosition(next.frameLength)
-                player.scheduleBuffer(next)
-            }
+            updateTargetDelayFrames(for: captureFormat)
+            drainPendingBuffers()
         }
     }
 
@@ -419,51 +440,24 @@ final class AudioMirror: NSObject, SCStreamOutput, SCStreamDelegate {
 
         do {
             let buffer = try makePCMBuffer(from: sampleBuffer)
+
             if captureFormat == nil {
                 try configureEngine(format: buffer.format)
             }
 
-            pendingBuffers.append(buffer)
-            pendingFrames += AVAudioFramePosition(buffer.frameLength)
-
-            while pendingFrames > targetDelayFrames, !pendingBuffers.isEmpty {
-                let next = pendingBuffers.removeFirst()
-                pendingFrames -= AVAudioFramePosition(next.frameLength)
-                player.scheduleBuffer(next)
-            }
+            enqueue(buffer)
         } catch {
-            if let onError {
-                onError(error)
-            } else {
-                fputs("\nAudio mirror error: \(error.localizedDescription)\n", stderr)
-            }
+            reportAudioError(error)
         }
     }
 
     private func configureEngine(format: AVAudioFormat) throws {
         captureFormat = format
-        targetDelayFrames = AVAudioFramePosition(
-            format.sampleRate * Double(delayMilliseconds) / 1_000.0
-        )
+        updateTargetDelayFrames(for: format)
 
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: format)
-
-        guard let audioUnit = engine.outputNode.audioUnit else {
-            throw MirrorError.coreAudio("Accessing the built-in output unit", -1)
-        }
-        var deviceID = outputDevice.id
-        let status = AudioUnitSetProperty(
-            audioUnit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &deviceID,
-            UInt32(MemoryLayout<AudioDeviceID>.size)
-        )
-        guard status == noErr else {
-            throw MirrorError.coreAudio("Routing MirrorPod to \(outputDevice.name)", status)
-        }
+        try routeEngineToOutputDevice()
 
         engine.prepare()
         engine.mainMixerNode.outputVolume = volume
@@ -474,10 +468,59 @@ final class AudioMirror: NSObject, SCStreamOutput, SCStreamDelegate {
         print("Press Control-C to stop.")
     }
 
+    private func routeEngineToOutputDevice() throws {
+        guard let audioUnit = engine.outputNode.audioUnit else {
+            throw MirrorError.coreAudio("Accessing the built-in output unit", -1)
+        }
+
+        var deviceID = outputDevice.id
+        let status = AudioUnitSetProperty(
+            audioUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &deviceID,
+            UInt32(MemoryLayout<AudioDeviceID>.size)
+        )
+
+        guard status == noErr else {
+            throw MirrorError.coreAudio("Routing MirrorPod to \(outputDevice.name)", status)
+        }
+    }
+
+    private func updateTargetDelayFrames(for format: AVAudioFormat) {
+        targetDelayFrames = AVAudioFramePosition(
+            format.sampleRate * Double(delayMilliseconds) / 1_000.0
+        )
+    }
+
+    private func enqueue(_ buffer: AVAudioPCMBuffer) {
+        pendingBuffers.append(buffer)
+        pendingFrames += AVAudioFramePosition(buffer.frameLength)
+        drainPendingBuffers()
+    }
+
+    private func drainPendingBuffers() {
+        while pendingFrames > targetDelayFrames, let buffer = pendingBuffers.first {
+            pendingBuffers.removeFirst()
+            pendingFrames -= AVAudioFramePosition(buffer.frameLength)
+            player.scheduleBuffer(buffer)
+        }
+    }
+
+    private func reportAudioError(_ error: Error) {
+        guard let onError else {
+            fputs("\nAudio mirror error: \(error.localizedDescription)\n", stderr)
+            return
+        }
+
+        onError(error)
+    }
+
     private func makePCMBuffer(from sampleBuffer: CMSampleBuffer) throws -> AVAudioPCMBuffer {
         guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
-              let streamDescription = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription),
-              let format = AVAudioFormat(streamDescription: streamDescription)
+            let streamDescription = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription),
+            let format = AVAudioFormat(streamDescription: streamDescription)
         else {
             throw MirrorError.invalidAudioBuffer
         }
@@ -513,7 +556,7 @@ final class AudioMirror: NSObject, SCStreamOutput, SCStreamDelegate {
 
         for index in 0..<sourceList.count {
             guard let sourceData = sourceList[index].mData,
-                  let destinationData = destinationList[index].mData
+                let destinationData = destinationList[index].mData
             else {
                 throw MirrorError.invalidAudioBuffer
             }
@@ -529,57 +572,78 @@ final class AudioMirror: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 }
 
+// MARK: - Command-line app
+
 #if !MENUBAR_APP
 @main
 private struct MirrorPodApp {
     static func main() async {
         do {
-            let options = try Options.parse()
-            let devices = try AudioHardware.outputDevices()
-
-            if options.listDevices {
-                for device in devices {
-                    let builtIn = device.isBuiltInOutput ? " [built-in]" : ""
-                    print("\(device.name) — \(device.outputChannels) channels\(builtIn)")
-                }
-                return
-            }
-
-            guard let builtInOutput = devices.first(where: \AudioDevice.isBuiltInOutput) else {
-                throw MirrorError.noBuiltInOutput
-            }
-
-            if let defaultOutput = AudioHardware.defaultOutputName() {
-                print("Normal Mac output: \(defaultOutput)")
-                if defaultOutput == builtInOutput.name {
-                    print("Warning: choose the HomePod as the Mac's normal Sound output before playing audio.")
-                }
-            }
-
-            let mirror = AudioMirror(
-                outputDevice: builtInOutput,
-                delayMilliseconds: options.delayMilliseconds
-            )
-            try await mirror.start()
-            print("Waiting for audio…")
-
-            signal(SIGINT, SIG_IGN)
-            let interrupt = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
-            interrupt.setEventHandler {
-                Task {
-                    print("\nStopping MirrorPod…")
-                    await mirror.stop()
-                    exit(0)
-                }
-            }
-            interrupt.resume()
-            await withUnsafeContinuation { (_: UnsafeContinuation<Void, Never>) in
-                // The signal handler above exits the process. Keeping this task suspended lets
-                // ScreenCaptureKit, AVAudioEngine, and Dispatch continue servicing their queues.
-            }
+            try await run()
         } catch {
             fputs("MirrorPod: \(error.localizedDescription)\n", stderr)
             exit(1)
+        }
+    }
+
+    private static func run() async throws {
+        let options = try CommandLineOptions.parse()
+        let devices = try AudioHardware.outputDevices()
+
+        guard !options.listDevices else {
+            printDevices(devices)
+            return
+        }
+
+        guard let builtInOutput = devices.first(where: \AudioDevice.isBuiltInOutput) else {
+            throw MirrorError.noBuiltInOutput
+        }
+
+        printCurrentOutput(comparedWith: builtInOutput)
+
+        let mirror = AudioMirror(
+            outputDevice: builtInOutput,
+            delayMilliseconds: options.delayMilliseconds
+        )
+
+        try await mirror.start()
+        print("Waiting for audio…")
+
+        await waitForInterrupt(toStop: mirror)
+    }
+
+    private static func printDevices(_ devices: [AudioDevice]) {
+        for device in devices {
+            let builtInLabel = device.isBuiltInOutput ? " [built-in]" : ""
+            print("\(device.name) — \(device.outputChannels) channels\(builtInLabel)")
+        }
+    }
+
+    private static func printCurrentOutput(comparedWith builtInOutput: AudioDevice) {
+        guard let currentOutput = AudioHardware.defaultOutputName() else { return }
+
+        print("Normal Mac output: \(currentOutput)")
+
+        if currentOutput == builtInOutput.name {
+            print("Warning: choose the HomePod as the Mac's normal Sound output before playing audio.")
+        }
+    }
+
+    private static func waitForInterrupt(toStop mirror: AudioMirror) async {
+        signal(SIGINT, SIG_IGN)
+
+        let interrupt = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        interrupt.setEventHandler {
+            Task {
+                print("\nStopping MirrorPod…")
+                await mirror.stop()
+                exit(0)
+            }
+        }
+        interrupt.resume()
+
+        await withUnsafeContinuation { (_: UnsafeContinuation<Void, Never>) in
+            // The signal handler exits the process. Suspending here keeps the audio queues alive.
         }
     }
 }

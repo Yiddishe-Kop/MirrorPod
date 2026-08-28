@@ -6,14 +6,14 @@ let package = Package(
     name: "MirrorPod",
     platforms: [.macOS(.v14)],
     products: [
-        .executable(name: "mirrorpod", targets: ["MirrorPod"]),
+        .executable(name: "mirrorpod", targets: ["MirrorPod"])
     ],
     targets: [
         .executableTarget(
             name: "MirrorPod",
             swiftSettings: [
-                .swiftLanguageMode(.v5),
+                .swiftLanguageMode(.v5)
             ]
-        ),
+        )
     ]
 )

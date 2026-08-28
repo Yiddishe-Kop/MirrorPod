@@ -1,0 +1,13 @@
+{
+    "indentation": {
+        "spaces": 4
+    },
+    "indentConditionalCompilationBlocks": false,
+    "lineLength": 120,
+    "respectsExistingLineBreaks": true,
+    "rules": {
+        "NeverForceUnwrap": true,
+        "OrderedImports": true
+    },
+    "version": 1
+}

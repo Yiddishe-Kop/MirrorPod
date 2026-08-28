@@ -14,8 +14,8 @@ It avoids macOS's unreliable AirPlay Multi-Output Device behavior:
 ## Recommended: menu-bar app
 
 1. Clone or download this repository on a Mac running macOS 26 or later.
-2. Double-click **Build Menu App.command** to create **MirrorPod.app** locally.
-3. Double-click **MirrorPod.app**, then click its speaker icon in the menu bar.
+2. Run `./scripts/build-app.sh` to create **MirrorPod.app** locally.
+3. Open **MirrorPod.app**, then click its speaker icon in the menu bar.
 4. If requested, allow **MirrorPod** under **System Settings → Privacy & Security → Screen & System Audio Recording**, then quit and reopen the app.
 5. Keep the HomePod selected as the normal Mac output. MirrorPod starts automatically and mirrors the audio to the MacBook speakers.
 
@@ -29,39 +29,26 @@ The menu includes:
 
 After the menu app works, you can remove or disable the old **Terminal** and command-line **mirrorpod** recording permissions. Keep the new **MirrorPod** permission enabled.
 
-## Terminal version
+## Command-line version
 
 1. Choose the HomePod in **System Settings → Sound → Output**.
-2. Double-click **Start MirrorPod.command**.
-3. On the first run, approve **Screen & System Audio Recording** access for Terminal, then run **Start MirrorPod.command** again.
+2. Run `swift run -c release mirrorpod`.
+3. On the first run, approve **Screen & System Audio Recording** access for Terminal, then rerun the command.
 4. Keep the Terminal window open. Press **Control-C** there to stop.
-
-The launcher automatically builds the utility the first time.
-
-## Build manually
-
-```sh
-cd /path/to/MirrorPod
-swift build -c release
-```
-
-## Run
-
-First choose the HomePod in **System Settings → Sound → Output**. Then run:
-
-```sh
-.build/release/mirrorpod
-```
-
-The first run asks for **Screen & System Audio Recording** permission. Approve it, quit MirrorPod, and launch it again.
 
 The MacBook copy is delayed by 2000 ms by default to approximately match HomePod's AirPlay delay. Tune it if necessary:
 
 ```sh
-.build/release/mirrorpod --delay-ms 1800
+swift run -c release mirrorpod --delay-ms 1800
 ```
 
-Press **Control-C** to stop.
+## Development
+
+```sh
+xcrun swift-format lint --recursive --configuration .swift-format Sources Package.swift
+swift build -c release
+./scripts/build-app.sh
+```
 
 ## Notes
 

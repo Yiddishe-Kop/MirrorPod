@@ -2,6 +2,8 @@
 import AppKit
 import SwiftUI
 
+// MARK: - State
+
 private enum MirrorRunState: Equatable {
     case stopped
     case starting
@@ -48,39 +50,41 @@ private enum MirrorRunState: Equatable {
 
 @MainActor
 private final class MirrorPodController: ObservableObject {
+    private enum Preference {
+        static let delayMilliseconds = "MirrorPodDelayMilliseconds"
+        static let macSpeakerVolume = "MirrorPodMacSpeakerVolume"
+    }
+
     @Published private(set) var state: MirrorRunState = .stopped
-    @Published private(set) var normalOutputName = "Checking…"
-    @Published private(set) var normalOutputVolume = 1.0
-    @Published private(set) var normalOutputVolumeAvailable = false
+    @Published private(set) var selectedOutputName = "Checking…"
+    @Published private(set) var selectedOutputVolume = 1.0
+    @Published private(set) var selectedOutputVolumeAvailable = false
     @Published var delayMilliseconds: Int {
         didSet {
-            UserDefaults.standard.set(delayMilliseconds, forKey: Self.delayKey)
+            UserDefaults.standard.set(delayMilliseconds, forKey: Preference.delayMilliseconds)
             mirror?.setDelayMilliseconds(delayMilliseconds)
         }
     }
     @Published var macSpeakerVolume: Double {
         didSet {
-            UserDefaults.standard.set(macSpeakerVolume, forKey: Self.macVolumeKey)
+            UserDefaults.standard.set(macSpeakerVolume, forKey: Preference.macSpeakerVolume)
             mirror?.setVolume(Float(macSpeakerVolume))
         }
     }
 
-    private static let delayKey = "MirrorPodDelayMilliseconds"
-    private static let macVolumeKey = "MirrorPodMacSpeakerVolume"
     private var mirror: AudioMirror?
     private var didAttemptAutomaticStart = false
 
     init() {
-        if UserDefaults.standard.object(forKey: Self.delayKey) != nil {
-            delayMilliseconds = UserDefaults.standard.integer(forKey: Self.delayKey)
-        } else {
-            delayMilliseconds = 2_000
-        }
-        if UserDefaults.standard.object(forKey: Self.macVolumeKey) != nil {
-            macSpeakerVolume = UserDefaults.standard.double(forKey: Self.macVolumeKey)
-        } else {
-            macSpeakerVolume = 1
-        }
+        delayMilliseconds = Self.savedInteger(
+            forKey: Preference.delayMilliseconds,
+            default: 2_000
+        )
+        macSpeakerVolume = Self.savedDouble(
+            forKey: Preference.macSpeakerVolume,
+            default: 1
+        )
+
         refreshOutput()
     }
 
@@ -97,11 +101,11 @@ private final class MirrorPodController: ObservableObject {
         case .needsPermission:
             "Allow Screen & System Audio Recording, then reopen MirrorPod."
         case .chooseHomePod:
-            "Select Living Room as the normal Mac output before starting."
+            "Select your HomePod as the normal Mac output before starting."
         case .failed(let message):
             message
         case .waitingForAudio:
-            "Start playback in Spotify."
+            "Start playing audio on your Mac."
         default:
             nil
         }
@@ -123,53 +127,22 @@ private final class MirrorPodController: ObservableObject {
 
     func start() async {
         guard mirror == nil, !state.isBusy else { return }
+
         state = .starting
 
         do {
-            let devices = try AudioHardware.outputDevices()
-            guard let builtInOutput = devices.first(where: \AudioDevice.isBuiltInOutput) else {
-                throw MirrorError.noBuiltInOutput
-            }
+            guard let newMirror = try makeAudioMirror() else { return }
 
-            refreshOutput()
-            guard normalOutputName != builtInOutput.name else {
-                state = .chooseHomePod
-                return
-            }
-
-            let newMirror = AudioMirror(
-                outputDevice: builtInOutput,
-                delayMilliseconds: delayMilliseconds,
-                volume: Float(macSpeakerVolume)
-            )
-            newMirror.onPlaybackStarted = { [weak self] in
-                Task { @MainActor in
-                    self?.state = .running
-                }
-            }
-            newMirror.onError = { [weak self] error in
-                Task { @MainActor in
-                    self?.state = .failed(error.localizedDescription)
-                    self?.mirror = nil
-                }
-            }
+            bindCallbacks(to: newMirror)
             mirror = newMirror
 
-            do {
-                try await newMirror.start()
-                if state == .starting {
-                    state = .waitingForAudio
-                }
-            } catch MirrorError.permissionDenied {
-                mirror = nil
-                state = .needsPermission
-            } catch {
-                mirror = nil
-                state = .failed(error.localizedDescription)
+            try await newMirror.start()
+
+            if state == .starting {
+                state = .waitingForAudio
             }
         } catch {
-            mirror = nil
-            state = .failed(error.localizedDescription)
+            handleStartFailure(error)
         }
     }
 
@@ -178,6 +151,7 @@ private final class MirrorPodController: ObservableObject {
             state = .stopped
             return
         }
+
         state = .stopping
         await mirror.stop()
         self.mirror = nil
@@ -185,21 +159,23 @@ private final class MirrorPodController: ObservableObject {
     }
 
     func refreshOutput() {
-        normalOutputName = AudioHardware.defaultOutputName() ?? "Unavailable"
-        if let volume = AudioHardware.defaultOutputVolume() {
-            normalOutputVolume = Double(volume)
-            normalOutputVolumeAvailable = true
-        } else {
-            normalOutputVolumeAvailable = false
+        selectedOutputName = AudioHardware.defaultOutputName() ?? "Unavailable"
+
+        guard let volume = AudioHardware.defaultOutputVolume() else {
+            selectedOutputVolumeAvailable = false
+            return
         }
+
+        selectedOutputVolume = Double(volume)
+        selectedOutputVolumeAvailable = true
     }
 
-    func setNormalOutputVolume(_ newValue: Double) {
+    func setSelectedOutputVolume(_ newValue: Double) {
         let clampedValue = min(max(newValue, 0), 1)
         do {
             try AudioHardware.setDefaultOutputVolume(Float(clampedValue))
-            normalOutputVolume = clampedValue
-            normalOutputVolumeAvailable = true
+            selectedOutputVolume = clampedValue
+            selectedOutputVolumeAvailable = true
         } catch {
             state = .failed(error.localizedDescription)
         }
@@ -224,7 +200,68 @@ private final class MirrorPodController: ObservableObject {
         guard let url = URL(string: value) else { return }
         NSWorkspace.shared.open(url)
     }
+
+    private func makeAudioMirror() throws -> AudioMirror? {
+        let devices = try AudioHardware.outputDevices()
+
+        guard let builtInOutput = devices.first(where: \AudioDevice.isBuiltInOutput) else {
+            throw MirrorError.noBuiltInOutput
+        }
+
+        refreshOutput()
+
+        guard selectedOutputName != builtInOutput.name else {
+            state = .chooseHomePod
+            return nil
+        }
+
+        return AudioMirror(
+            outputDevice: builtInOutput,
+            delayMilliseconds: delayMilliseconds,
+            volume: Float(macSpeakerVolume)
+        )
+    }
+
+    private func bindCallbacks(to mirror: AudioMirror) {
+        mirror.onPlaybackStarted = { [weak self] in
+            Task { @MainActor in
+                self?.state = .running
+            }
+        }
+
+        mirror.onError = { [weak self] error in
+            Task { @MainActor in
+                self?.state = .failed(error.localizedDescription)
+                self?.mirror = nil
+            }
+        }
+    }
+
+    private func handleStartFailure(_ error: Error) {
+        mirror = nil
+
+        if let mirrorError = error as? MirrorError,
+            case .permissionDenied = mirrorError
+        {
+            state = .needsPermission
+            return
+        }
+
+        state = .failed(error.localizedDescription)
+    }
+
+    private static func savedInteger(forKey key: String, default defaultValue: Int) -> Int {
+        guard UserDefaults.standard.object(forKey: key) != nil else { return defaultValue }
+        return UserDefaults.standard.integer(forKey: key)
+    }
+
+    private static func savedDouble(forKey key: String, default defaultValue: Double) -> Double {
+        guard UserDefaults.standard.object(forKey: key) != nil else { return defaultValue }
+        return UserDefaults.standard.double(forKey: key)
+    }
 }
+
+// MARK: - Menu
 
 private struct MirrorPodMenuView: View {
     @ObservedObject var controller: MirrorPodController
@@ -256,16 +293,16 @@ private struct MirrorPodMenuView: View {
 
     private var topBar: some View {
         HStack(spacing: 8) {
-            routing
+            routingChip
             Spacer(minLength: 4)
-            primaryAction
+            mirroringButton
         }
     }
 
-    private var routing: some View {
+    private var routingChip: some View {
         HStack(spacing: 7) {
             Image(systemName: "homepodmini.fill")
-            Text(controller.normalOutputName == "AirPlay" ? "HomePod" : controller.normalOutputName)
+            Text(controller.selectedOutputName == "AirPlay" ? "HomePod" : controller.selectedOutputName)
                 .lineLimit(1)
             Image(systemName: "arrow.right")
                 .font(.caption2.weight(.semibold))
@@ -280,12 +317,12 @@ private struct MirrorPodMenuView: View {
         .padding(.vertical, 6)
         .glassEffect(.clear, in: Capsule())
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Routing from \(controller.normalOutputName) to MacBook speakers")
+        .accessibilityLabel("Routing from \(controller.selectedOutputName) to MacBook speakers")
     }
 
     private var controls: some View {
         VStack(spacing: 10) {
-            volumes
+            volumeControls
             Divider()
                 .opacity(0.45)
             delayControl
@@ -317,57 +354,24 @@ private struct MirrorPodMenuView: View {
         .accessibilityValue("\(controller.delayMilliseconds) milliseconds")
     }
 
-    private var volumes: some View {
+    private var volumeControls: some View {
         VStack(spacing: 9) {
-            volumeControl(
+            VolumeControl(
                 title: "HomePod",
                 value: Binding(
-                    get: { controller.normalOutputVolume },
-                    set: { controller.setNormalOutputVolume($0) }
+                    get: { controller.selectedOutputVolume },
+                    set: { controller.setSelectedOutputVolume($0) }
                 ),
-                enabled: controller.normalOutputVolumeAvailable
+                isEnabled: controller.selectedOutputVolumeAvailable
             )
-            volumeControl(
+            VolumeControl(
                 title: "MacBook",
                 value: $controller.macSpeakerVolume
             )
         }
     }
 
-    private func volumeControl(
-        title: String,
-        value: Binding<Double>,
-        enabled: Bool = true
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(title)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer()
-                Text(value.wrappedValue, format: .percent.precision(.fractionLength(0)))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
-            .font(.callout)
-
-            Slider(value: value, in: 0...1) {
-                Text("\(title) volume")
-            } minimumValueLabel: {
-                Image(systemName: "speaker.fill")
-                    .accessibilityHidden(true)
-            } maximumValueLabel: {
-                Image(systemName: "speaker.wave.3.fill")
-                    .accessibilityHidden(true)
-            }
-            .labelsHidden()
-            .disabled(!enabled)
-            .accessibilityLabel("\(title) volume")
-            .accessibilityValue("\(Int((value.wrappedValue * 100).rounded())) percent")
-        }
-    }
-
-    private var primaryAction: some View {
+    private var mirroringButton: some View {
         Button {
             Task { await controller.toggle() }
         } label: {
@@ -428,6 +432,43 @@ private struct MirrorPodMenuView: View {
         case .running: .green
         case .needsPermission, .chooseHomePod, .failed: .orange
         default: .secondary
+        }
+    }
+}
+
+private struct VolumeControl: View {
+    let title: String
+    @Binding var value: Double
+    var isEnabled = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(title)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                Spacer()
+
+                Text(value, format: .percent.precision(.fractionLength(0)))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            .font(.callout)
+
+            Slider(value: $value, in: 0...1) {
+                Text("\(title) volume")
+            } minimumValueLabel: {
+                Image(systemName: "speaker.fill")
+                    .accessibilityHidden(true)
+            } maximumValueLabel: {
+                Image(systemName: "speaker.wave.3.fill")
+                    .accessibilityHidden(true)
+            }
+            .labelsHidden()
+            .disabled(!isEnabled)
+            .accessibilityLabel("\(title) volume")
+            .accessibilityValue("\(Int((value * 100).rounded())) percent")
         }
     }
 }
